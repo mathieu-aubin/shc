@@ -1,12 +1,34 @@
 CHANGES
 
+4.0.1 Tue Nov 20 08:22:20 UTC 2018
+
+    * Add LDFLAGS environment variable (Thanks to zboszor <https://github.com/zboszor>)
+
+4.0.0 Mon Nov 12 16:54:56 UTC 2018
+
+	* Add -H option for extra security without root (Thanks to intika <https://github.com/intika>). It protects against dumping, code injection, `cat /proc/pid/cmdline`, ptrace, etc.. (only works with Bourne shell (sh) scripts with no parameter)
+    * Add -s option to force single process for hardening features (requires -H) <https://github.com/intika>. (only works with Bourne shell (sh) scripts with no parameter)
+	* dash support
+
+3.9.8 Sat Oct 20 17:49:28 UTC 2018
+
+	* Add setuid option -S (Thanks to Boon Pang <https://github.com/wombat78>)
+
+3.9.7 Sat Oct 20 15:25:13 UTC 2018
+
+	* Fix issue #58
+
+3.9.6 Sat Jun  3 10:05:03 UTC 2017
+
+    * Fix issue #38
+
 3.9.5 Wed May 31 01:35:33 UTC 2017
 
     * Fix issue #36
 
 3.9.4   Sat May 13 18:46:05 UTC 2017
 
-    * Fix issue #23 (debian bug #861180)
+    * Fix issue #23 (debian bug #861180) (Thanks to original author Francisco Rosales <frosal@fi.upm.es>)
 
 3.9.3   Sat Jul 30 18:46:34 BDT 2016
 

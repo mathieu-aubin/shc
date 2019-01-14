@@ -9,3 +9,6 @@
 *.png
 *.jpg
 *.log
+a.out
+*.x
+*.x.c

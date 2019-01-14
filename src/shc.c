@@ -17,7 +17,7 @@
  */
 
 static const char my_name[] = "shc";
-static const char version[] = "Version 3.9.5";
+static const char version[] = "Version 4.0.1";
 static const char subject[] = "Generic Shell Script Compiler";
 static const char cpright[] = "GNU GPL Version 3";
 static const struct { const char * f, * s, * e; }
@@ -68,7 +68,7 @@ static const char * abstract[] = {
 0};
 
 static const char usage[] = 
-"Usage: shc [-e date] [-m addr] [-i iopt] [-x cmnd] [-l lopt] [-o outfile] [-rvDUCABh] -f script";
+"Usage: shc [-e date] [-m addr] [-i iopt] [-x cmnd] [-l lopt] [-o outfile] [-rvDSUHCABhs] -f script";
 
 static const char * help[] = {
 "",
@@ -81,8 +81,18 @@ static const char * help[] = {
 "    -o %s  output filename",
 "    -r     Relax security. Make a redistributable binary",
 "    -v     Verbose compilation",
+"    -S     Switch ON setuid for root callable programs [OFF]",
 "    -D     Switch ON debug exec calls [OFF]",
 "    -U     Make binary untraceable [no]",
+"    -H     Hardening : extra security protection [no]",
+"           untraceable, undumpable, etc. and root is not required",
+"           * currently only works with bourne shell (sh)",
+"           * does not work with positional parameters",
+"    -s     Hardening : use a single process (no child) [no]",
+"           option available only with -H otherwise its ignored",
+"           experimental feature may hang...",
+"           * currently only works with bourne shell (sh)",
+"           * does not work with positional parameters",
 "    -C     Display license and exit",
 "    -A     Display abstract and exit",
 "    -B     Compile for busybox",
@@ -92,6 +102,7 @@ static const char * help[] = {
 "    Name    Default  Usage",
 "    CC      cc       C compiler command",
 "    CFLAGS  <none>   C compiler flags",
+"    LDFLAGS <none>   Linker flags",
 "",
 "    Please consult the shc man page.",
 "",
@@ -125,15 +136,24 @@ static char * lsto;
 static char * opts;
 static char * text;
 static int verbose;
+static const char SETUID_line[] =
+"#define SETUID %d	/* Define as 1 to call setuid(0) at start of script */\n";
+static int SETUID_flag = 0;
 static const char DEBUGEXEC_line[] =
 "#define DEBUGEXEC	%d	/* Define as 1 to debug execvp calls */\n";
-static int DEBUGEXEC_flag;
+static int DEBUGEXEC_flag = 0;
 static const char TRACEABLE_line[] =
 "#define TRACEABLE	%d	/* Define as 1 to enable ptrace the executable */\n";
-static int TRACEABLE_flag=1;
+static int TRACEABLE_flag = 1;
+static const char HARDENING_line[] =
+"#define HARDENING	%d	/* Define as 1 to disable ptrace/dump the executable */\n";
+static int HARDENING_flag = 0;
+static const char HARDENINGSP_line[] =
+"#define HARDENINGSP	%d	/* Define as 1 to disable bash child process */\n";
+static int HARDENINGSP_flag = 0;
 static const char BUSYBOXON_line[] =
 "#define BUSYBOXON	%d	/* Define as 1 to enable work with busybox */\n";
-static int BUSYBOXON_flag;
+static int BUSYBOXON_flag = 0;
 
 static const char * RTC[] = {
 "",
@@ -203,6 +223,165 @@ static const char * RTC[] = {
 "}",
 "",
 "/* End of ARC4 */",
+"",
+"#if HARDENING",
+"",
+"#include <sys/ptrace.h>",
+"#include <sys/wait.h>",
+"#include <signal.h>",
+"#include <sys/prctl.h>",
+"#define PR_SET_PTRACER 0x59616d61",
+"",
+"/* Seccomp Sandboxing Init */",
+"#include <stdlib.h>",
+"#include <stdio.h>",
+"#include <stddef.h>",
+"#include <string.h>",
+"#include <unistd.h>",
+"#include <errno.h>",
+"",
+"#include <sys/types.h>",
+"#include <sys/prctl.h>",
+"#include <sys/syscall.h>",
+"#include <sys/socket.h>",
+"",
+"#include <linux/filter.h>",
+"#include <linux/seccomp.h>",
+"#include <linux/audit.h>",
+"",
+"#define ArchField offsetof(struct seccomp_data, arch)",
+"",
+"#define Allow(syscall) \\",
+"    BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, SYS_##syscall, 0, 1), \\",
+"    BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW)",
+"",
+"struct sock_filter filter[] = {",
+"    /* validate arch */",
+"    BPF_STMT(BPF_LD+BPF_W+BPF_ABS, ArchField),",
+"    BPF_JUMP( BPF_JMP+BPF_JEQ+BPF_K, AUDIT_ARCH_X86_64, 1, 0),",
+"    BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL),",
+"",
+"    /* load syscall */",
+"    BPF_STMT(BPF_LD+BPF_W+BPF_ABS, offsetof(struct seccomp_data, nr)),",
+"",
+"    /* list of allowed syscalls */",
+"    Allow(exit_group),  /* exits a processs */",
+"    Allow(brk),         /* for malloc(), inside libc */",
+"    Allow(mmap),        /* also for malloc() */",
+"    Allow(munmap),      /* for free(), inside libc */",
+"",
+"    /* and if we don't match above, die */",
+"    BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_KILL),",
+"};",
+"struct sock_fprog filterprog = {",
+"    .len = sizeof(filter)/sizeof(filter[0]),",
+"    .filter = filter",
+"};",
+"",
+"/* Seccomp Sandboxing - Set up the restricted environment */",
+"void seccomp_hardening() {",
+"    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) {",
+"        perror(\"Could not start seccomp:\");",
+"        exit(1);",
+"    }",
+"    if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &filterprog) == -1) {",
+"        perror(\"Could not start seccomp:\");",
+"        exit(1);",
+"    }",
+"} ",
+"/* End Seccomp Sandboxing Init */",
+"",
+"void arc4_hardrun(void * str, int len) {",
+"    //Decode locally",
+"    char tmp2[len];",
+"    memcpy(tmp2, str, len);",
+"",
+"	unsigned char tmp, * ptr = (unsigned char *)tmp2;",
+"",
+"    int lentmp = len;",
+"",
+"#if HARDENINGSP",
+"    //Start tracing to protect from dump & trace",
+"    if (ptrace(PTRACE_TRACEME, 0, 0, 0) < 0) {",
+"        printf(\"Operation not permitted\\n\");",
+"        kill(getpid(), SIGKILL);",
+"        exit(1);",
+"    }",
+"",     
+"    //Decode Bash",
+"    while (len > 0) {",
+"        indx++;",
+"        tmp = stte[indx];",
+"        jndx += tmp;",
+"        stte[indx] = stte[jndx];",
+"        stte[jndx] = tmp;",
+"        tmp += stte[indx];",
+"        *ptr ^= stte[tmp];",
+"        ptr++;",
+"        len--;",
+"    }",
+"",
+"    //Exec bash script",
+"    system(tmp2);",
+"",
+"    //Empty script variable",
+"    memcpy(tmp2, str, lentmp);",
+"",
+"    //Sinal to detach ptrace",
+"    ptrace(PTRACE_DETACH, 0, 0, 0);",
+"    exit(0);",
+"",
+"    /* Seccomp Sandboxing - Start */",
+"    seccomp_hardening();",
+"",
+"    exit(0);",
+"#endif /* HARDENINGSP Exit here anyway*/",
+"",
+"    int pid, status;",
+"    pid = fork();",
+"",     
+"    if(pid==0) {",
+"",
+"        //Start tracing to protect from dump & trace",
+"        if (ptrace(PTRACE_TRACEME, 0, 0, 0) < 0) {",
+"            printf(\"Operation not permitted\\n\");",
+"            kill(getpid(), SIGKILL);",
+"            _exit(1);",
+"        }",
+"",     
+"        //Decode Bash",
+"        while (len > 0) {",
+"            indx++;",
+"            tmp = stte[indx];",
+"            jndx += tmp;",
+"            stte[indx] = stte[jndx];",
+"            stte[jndx] = tmp;",
+"            tmp += stte[indx];",
+"            *ptr ^= stte[tmp];",
+"            ptr++;",
+"            len--;",
+"        }",
+"",
+"        //Exec bash script",
+"        system(tmp2);",
+"",
+"        //Empty script variable",
+"        memcpy(tmp2, str, lentmp);",
+"",
+"        //Sinal to detach ptrace",
+"        ptrace(PTRACE_DETACH, 0, 0, 0);",
+"        exit(0);",
+"    }",
+"    else {",
+"        wait(&status);",
+"    }",
+"",
+"    /* Seccomp Sandboxing - Start */",
+"    seccomp_hardening();",
+"",
+"    exit(0);",
+"} ",
+"#endif /* HARDENING */",
 "",
 "/*",
 " * Key with file invariants. ",
@@ -290,6 +469,54 @@ static const char * RTC[] = {
 "",
 "void chkenv_end(void){}",
 "",
+"#if HARDENING",
+"",
+"static void gets_process_name(const pid_t pid, char * name) {",
+"	char procfile[BUFSIZ];",
+"	sprintf(procfile, \"/proc/%d/cmdline\", pid);",
+"	FILE* f = fopen(procfile, \"r\");",
+"	if (f) {",
+"		size_t size;",
+"		size = fread(name, sizeof (char), sizeof (procfile), f);",
+"		if (size > 0) {",
+"			if ('\\n' == name[size - 1])",
+"				name[size - 1] = '\\0';",
+"		}",
+"		fclose(f);",
+"	}",
+"}",
+"",
+"void hardening() {",
+"    prctl(PR_SET_DUMPABLE, 0);",
+"    prctl(PR_SET_PTRACER, -1);",
+"",
+"    int pid = getppid();",
+"    char name[256] = {0};",
+"    gets_process_name(pid, name);",
+"",
+"    if (   (strcmp(name, \"bash\") != 0) ",
+"        && (strcmp(name, \"/bin/bash\") != 0) ",
+"        && (strcmp(name, \"sh\") != 0) ",
+"        && (strcmp(name, \"/bin/sh\") != 0) ",
+"        && (strcmp(name, \"sudo\") != 0) ",
+"        && (strcmp(name, \"/bin/sudo\") != 0) ",
+"        && (strcmp(name, \"/usr/bin/sudo\") != 0)",
+"        && (strcmp(name, \"gksudo\") != 0) ",
+"        && (strcmp(name, \"/bin/gksudo\") != 0) ",
+"        && (strcmp(name, \"/usr/bin/gksudo\") != 0) ",
+"        && (strcmp(name, \"kdesu\") != 0) ",
+"        && (strcmp(name, \"/bin/kdesu\") != 0) ",
+"        && (strcmp(name, \"/usr/bin/kdesu\") != 0) ",
+"       )",
+"    {",
+"        printf(\"Operation not permitted\\n\");",
+"        kill(getpid(), SIGKILL);",
+"        exit(1);",
+"    }",
+"}",
+"",
+"#endif /* HARDENING */",
+"",
 "#if !TRACEABLE",
 "",
 "#define _LINUX_SOURCE_COMPAT",
@@ -301,10 +528,14 @@ static const char * RTC[] = {
 "#include <stdio.h>",
 "#include <unistd.h>",
 "",
-"#if !defined(PTRACE_ATTACH) && defined(PT_ATTACH)",
-"#	define PTRACE_ATTACH	PT_ATTACH",
+"#if !defined(PT_ATTACHEXC) /* New replacement for PT_ATTACH */",
+"   #if !defined(PTRACE_ATTACH) && defined(PT_ATTACH)",
+"       #define PT_ATTACHEXC	PT_ATTACH",
+"   #elif defined(PTRACE_ATTACH)",
+"       #define PT_ATTACHEXC PTRACE_ATTACH",
+"   #endif",
 "#endif",
-
+"",
 "void untraceable(char * argv0)",
 "{",
 "	char proc[80];",
@@ -322,7 +553,7 @@ static const char * RTC[] = {
 "		close(0);",
 "		mine = !open(proc, O_RDWR|O_EXCL);",
 "		if (!mine && errno != EBUSY)",
-"			mine = !ptrace(PTRACE_ATTACH, pid, 0, 0);",
+"			mine = !ptrace(PT_ATTACHEXC, pid, 0, 0);",
 "		if (mine) {",
 "			kill(pid, SIGCONT);",
 "		} else {",
@@ -342,14 +573,14 @@ static const char * RTC[] = {
 "}",
 "#endif /* !TRACEABLE */",
 "",
-"int isFile(const char * file){struct stat info;if( stat( file, &info ) != 0 )return 0;else if( S_ISREG(info.st_mode) )return 1;else return 0;}",
 "char * xsh(int argc, char ** argv)",
 "{",
 "	char * scrpt;",
 "	int ret, i, j;",
 "	char ** varg;",
 "	char * me = argv[0];",
-"	if (me == NULL || !isFile(me)) { me = getenv(\"_\"); }",
+"	if (me == NULL) { me = getenv(\"_\"); }",
+"	if (me == 0) { fprintf(stderr, \"E: neither argv[0] nor $_ works.\"); exit(1); }",
 "",
 "	ret = chkenv(argc);",
 "	stte_0();",
@@ -378,6 +609,12 @@ static const char * RTC[] = {
 "		if (!rlax[0] && key_with_file(shll))",
 "			return shll;",
 "		arc4(opts, opts_z);",
+"#if HARDENING",
+"	    arc4_hardrun(text, text_z);",
+"	    exit(0);",
+"       /* Seccomp Sandboxing - Start */",
+"       seccomp_hardening();",
+"#endif",
 "		arc4(text, text_z);",
 "		arc4(tst2, tst2_z);",
 "		 key(tst2, tst2_z);",
@@ -427,8 +664,14 @@ static const char * RTC[] = {
 "",
 "int main(int argc, char ** argv)",
 "{",
+"#if SETUID",
+"   setuid(0);",
+"#endif",
 "#if DEBUGEXEC",
 "	debugexec(\"main\", argc, argv);",
+"#endif",
+"#if HARDENING",
+"	hardening();",
 "#endif",
 "#if !TRACEABLE",
 "	untraceable(argv[0]);",
@@ -446,7 +689,7 @@ static const char * RTC[] = {
 static int parse_an_arg(int argc, char * argv[])
 {
 	extern char * optarg;
-	const char * opts = "e:m:f:i:x:l:o:rvDUCABh";
+	const char * opts = "e:m:f:i:x:l:o:rvDSUHCABhs";
 	struct tm tmp[1];
 	time_t expdate;
 	int cnt, l;
@@ -501,11 +744,20 @@ static int parse_an_arg(int argc, char * argv[])
 	case 'v':
 		verbose++;
 		break;
+	case 'S':
+		SETUID_flag = 1;
+        break;
 	case 'D':
 		DEBUGEXEC_flag = 1;
 		break;
 	case 'U':
 		TRACEABLE_flag = 0;
+		break;
+	case 'H':
+		HARDENING_flag = 1;
+		break;
+	case 's':
+        HARDENINGSP_flag = 1;
 		break;
 	case 'C':
 		fprintf(stderr, "%s %s, %s\n", my_name, version, subject);
@@ -573,6 +825,12 @@ static void parse_args(int argc, char * argv[])
 		if (ret == -1)
 			err++;
 	} while (ret);
+    
+    if (HARDENING_flag == 0 && HARDENINGSP_flag == 1) {
+        fprintf(stderr, "\n%s '-s' feature is only available with '-H'\n",my_name);
+        err++;
+    }
+    
 	if (err) {
 		fprintf(stderr, "\n%s %s\n\n", my_name, usage);
 		exit(1);
@@ -672,6 +930,7 @@ struct {
 	{ "perl", "-e", "--", "exec('%s',@ARGV);" },
 	{ "rc",   "-c", "",   "builtin exec %s $*" },
 	{ "sh",   "-c", "",   "exec '%s' \"$@\"" }, /* IRIX_nvi */
+	{ "dash", "-c", "",   "exec '%s' \"$@\"" },
 	{ "bash", "-c", "",   "exec '%s' \"$@\"" },
 	{ "zsh",  "-c", "",   "exec '%s' \"$@\"" },
 	{ "bsh",  "-c", "",   "exec '%s' \"$@\"" }, /* AIX_nvi */
@@ -904,7 +1163,7 @@ int write_C(char * file, char * argv[])
 	indx = !rlax[0];
 	arc4(rlax, rlax_z); numd++;
 	if (indx && key_with_file(kwsh)) {
-		fprintf(stderr, "%s: invalid file name: %s", my_name, kwsh);
+		fprintf(stderr, "%s: invalid file name: %s ", my_name, kwsh);
 		perror("");
 		exit(1);
 	}
@@ -918,7 +1177,7 @@ int write_C(char * file, char * argv[])
 	name = strcat(realloc(name, strlen(name)+5), ".x.c");
 	o = fopen(name, "w");
 	if (!o) {
-		fprintf(stderr, "%s: creating output file: %s", my_name, name);
+		fprintf(stderr, "%s: creating output file: %s ", my_name, name);
 		perror("");
 		exit(1);
 	}
@@ -955,8 +1214,11 @@ int write_C(char * file, char * argv[])
 	} while (numd+=done);
 	fprintf(o, "/* End of data[] */;\n");
 	fprintf(o, "#define      %s_z	%d\n", "hide", 1<<12);
+	fprintf(o, SETUID_line, SETUID_flag);
 	fprintf(o, DEBUGEXEC_line, DEBUGEXEC_flag);
 	fprintf(o, TRACEABLE_line, TRACEABLE_flag);
+	fprintf(o, HARDENING_line, HARDENING_flag);
+	fprintf(o, HARDENINGSP_line, HARDENINGSP_flag);
     fprintf(o, BUSYBOXON_line, BUSYBOXON_flag);
 	for (indx = 0; RTC[indx]; indx++)
 		fprintf(o, "%s\n", RTC[indx]);
@@ -968,7 +1230,7 @@ int write_C(char * file, char * argv[])
 
 int make(void)
 {
-	char * cc, * cflags;
+	char * cc, * cflags, * ldflags;
 	char cmd[SIZE];
 
 	cc = getenv("CC");
@@ -977,6 +1239,9 @@ int make(void)
 	cflags = getenv("CFLAGS");
 	if (!cflags)
 		cflags = "";
+	ldflags = getenv("LDFLAGS");
+	if (!ldflags)
+		ldflags = "";
 
 if(!file2){
 file2=(char*)realloc(file2,strlen(file)+3);
@@ -984,7 +1249,7 @@ strcpy(file2,file);
 file2=strcat(file2,".x");
 
 }
-	sprintf(cmd, "%s %s %s.x.c -o %s", cc, cflags, file, file2);
+	sprintf(cmd, "%s %s %s %s.x.c -o %s", cc, cflags, ldflags, file, file2);
 	if (verbose) fprintf(stderr, "%s: %s\n", my_name, cmd);
 	if (system(cmd))
 		return -1;
